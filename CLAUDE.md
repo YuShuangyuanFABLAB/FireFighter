@@ -62,3 +62,9 @@ docs/                                   技术文档
 
 - Remote: https://github.com/YuShuangyuanFABLAB/FireFighter
 - Push 用 PowerShell (系统代理仅在 PowerShell 有效)
+
+## 文档
+
+- `docs/DEVELOPMENT_LOG.md` — 完整开发日志 (v2.0): 重要设定/经验教训/踩坑总结
+- `docs/superpowers/specs/firefighter-app-spec.md` — 设计规范
+- `docs/superpowers/plans/firefighter-app-plan.md` — 实施计划

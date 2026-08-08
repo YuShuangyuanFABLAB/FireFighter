@@ -284,29 +284,202 @@ D:\ProgramData\FirefighterApp\
 
 ---
 
-## 六、经验教训
+## 六、重要设定 (Key Design Decisions)
 
-### 6.1 技术
+### 6.1 Android 蓝牙权限 (API 31+ 分叉)
 
-1. **Kotlin-Java 互操作陷阱**: `PointF(Float, Float)` 和 `RectF(Float, Float, Float, Float)` 在 Kotlin 中构造函数解析有问题，返回值全为默认值。**解决方案**: 使用无参构造 + setter。
+Android 12 (API 31) 起蓝牙权限模型变更，必须在运行时区分处理：
 
-2. **Gradle + 中文路径不兼容**: Android Gradle Plugin 的测试运行器无法处理非 ASCII 路径。**解决方案**: 项目放纯 ASCII 路径。
+```kotlin
+// API 31+: 需要 BLUETOOTH_SCAN + BLUETOOTH_CONNECT
+// API 30-: 需要 BLUETOOTH + BLUETOOTH_ADMIN
+// 所有版本: 都需要 ACCESS_FINE_LOCATION (BLE 扫描依赖)
+```
 
-3. **配置驱动的价值**: 从模板继承的 `device_config.json` 模式让地图布局 (`colWidths`/`rowHeights`)、BLE UUID、颜色方案全部可配置，物理沙盘调整时无需改代码。
+**设定**: `MainActivity.requestBluetoothPermissions()` 根据 `Build.VERSION.SDK_INT` 动态选择权限列表，使用 `ActivityResultContracts.RequestMultiplePermissions()` 统一处理回调。
 
-4. **Canvas 渲染管道分层**: 5 层独立渲染器 (Grid→Warning→Path→Fire→Light) 设计让每层可独立开发、测试、启用/禁用，复杂度可控。
+### 6.2 BLE JSON 协议设计
 
-### 6.2 流程
+| 设定 | 值 | 原因 |
+|------|-----|------|
+| 分隔符 | 换行 `\n` | ESP32 `println()` 自动追加，解析端按行切分 |
+| MTU | 512 字节 | ESP32 BLE 默认 MTU，单条消息必须 < 512B |
+| 消息标识 | `"type"` 字段 | 7 种类型通过 `when(type)` 分发 |
+| 灯牌类型名 | 保留全名 `HORIZONTAL_UP` 等 | 单条消息不超 MTU，暂未缩短 |
+| JSON 库 | APP: kotlinx.serialization, ESP32: 手写字符串拼接 | ESP32 内存受限，避免引入 ArduinoJson |
 
-5. **TDD 发现了 4 个真实 Bug**: `PointF`/`RectF` 互操作、`hitTest` 边界、地图墙壁数据错误、A\* 测试断言过严。如果没有先写测试，这些问题可能在硬件联调时才暴露。
+**关键细节**: ESP32 连接后延时 2 秒才推送静态配置，确保 APP 端 BLE 特征值已就绪：
 
-6. **Spec 先行减少了返工**: 在头脑风暴阶段确认了功能清单和设计决策，避免了开发中途的需求变更。
+```
+连接事件 → delay 2s → MAP_CONFIG → delay 500ms → LIGHT_CONFIG
+→ delay 500ms → FIRE_UPDATE + DIRECTION_UPDATE
+→ 之后 SENSOR_STATE 每500ms, HEARTBEAT 每5s
+```
 
-7. **环境搭建占 30% 时间**: JDK 安装、SDK 路径查找、中文路径问题、资源文件迁移等环境问题消耗了大量时间。建议新项目一开始就用纯 ASCII 路径。
+### 6.3 Canvas 旋转 90° 适配竖屏
+
+火场沙盘是 10×5 横向布局，但 APP 竖屏显示。**设定**: Canvas 渲染前旋转 90° (`Matrix.postRotate(90, cx, cy)`)，让横向地图填满竖屏宽度。所有渲染器在逻辑坐标系 (x=0..9, y=0..4) 工作，`GridCoordinateMapper` 负责逻辑坐标 → 像素映射。
+
+```kotlin
+// FireMapView.onDraw():
+canvas.save()
+canvas.concat(transform)  // transform 包含 90°旋转 + scale + translate
+// 5层渲染...
+canvas.restore()
+```
+
+### 6.4 动画系统设计
+
+| 动画 | 实现 | 周期 | 触发条件 |
+|------|------|------|---------|
+| 火点辉光脉冲 | `ValueAnimator` + `RadialGradient` alpha 变化 | 2000ms | fireCount > 0 |
+| 灯牌箭头闪烁 | `animPhase < 0.5f` 判断 | 500ms (等效) | fireCount > 0, 方向=1/2/3 |
+| 被困波纹扩散 | `WarningRenderer` 多层 `RadialGradient` | 1500ms | 存在 direction=4 的灯牌 |
+| 出口呼吸灯 | `GridRenderer` 绿色虚线 + alpha 变化 | 3000ms | 始终运行 |
+| 路线虚线流动 | `DashPathEffect` + `dashPhase` 递增 | 连续 | 有进攻路线时 |
+
+**关键设定**: 动画仅在 fireCount > 0 时运行，无火情自动停止以节省资源。
+
+### 6.5 DataStore 持久化策略
+
+```
+firefighter_data (Preferences DataStore)
+├── last_device_address  → 最后连接的 BLE 设备 MAC
+├── fire_timeline        → 火灾时间线 (每条带时间戳，最新在前，上限 10000 字符)
+└── map_config           → 地图配置 JSON (备份)
+```
+
+**设定**: DataStore 而非 Room/SQLite — 数据结构简单 (键值对)，无需关系查询，DataStore 的 Flow API 与 MVVM 天然集成。
+
+### 6.6 配置文件加载架构
+
+`device_config.json` 从 `app/src/main/assets/config/` 加载，使用 `kotlinx.serialization.json.decodeFromStream()` 直接反序列化为 `DeviceConfig` 数据类。
+
+```json
+{
+  "appConfig":    { scanDuration, autoReconnect, reconnectInterval, maxReconnectAttempts },
+  "bleConfig":    { services[].uuid + characteristics[].uuid/type/dataFormat, deviceFilters },
+  "mapLayout":    { cols, rows, colWidths[], rowHeights[], 颜色, padding }
+}
+```
+
+**设定**: `ConfigLoader.loadDeviceConfigSafely()` 提供安全版本，解析失败返回 null 而不崩溃。
+
+### 6.7 命令系统二次确认
+
+所有破坏性操作 (SYSTEM_RESET, REMOVE_FIRE:ALL) 在分析面板触发前弹出确认对话框，防止误触。
 
 ---
 
-## 七、版本历史
+## 七、经验教训
+
+### 7.1 技术
+
+1. **Kotlin-Java 互操作陷阱**: `PointF(Float, Float)` 和 `RectF(Float, Float, Float, Float)` 在 Kotlin 中构造函数解析有问题，返回值全为默认值。**解决方案**: 使用无参构造 + setter。**影响范围**: `GridCoordinateMapper.cellRect()` 和 `cellCenter()` 两个方法。
+
+2. **Gradle + 中文路径不兼容**: Android Gradle Plugin 的测试运行器无法处理非 ASCII 路径。现象是 `ClassNotFoundException`（4 个测试类同时找不到）。**解决方案**: 项目从 `E:\FABLAB 法贝实验室\...` 移至 `D:\ProgramData\FirefighterApp\`。**教训**: 所有开发路径必须纯 ASCII。
+
+3. **配置驱动的价值**: 从模板继承的 `device_config.json` 模式让地图布局 (`colWidths`/`rowHeights`)、BLE UUID、颜色方案全部可配置，物理沙盘调整时无需改代码。
+
+4. **Canvas 渲染管道分层**: 5 层独立渲染器 (Grid→Warning→Path→Fire→Light) + 1 层 PriorityOverlay 设计让每层可独立开发、测试、启用/禁用，复杂度可控。每层渲染器是无状态的纯函数，接收数据参数，不持有可变状态。
+
+5. **Kotlin sealed class + when 穷举**: `FireMessage` 密封类 7 个子类，`FireDataParser` 的 `when(type)` 在编译期保证所有消息类型被处理。新增消息类型时编译器会报错提醒。
+
+6. **LiveData 而非 StateFlow**: 项目选择 LiveData 而非 Kotlin StateFlow — 模板代码已使用 LiveData，且 LiveData 自动感知生命周期，在 Fragment 销毁时自动取消订阅，避免内存泄漏。
+
+7. **ViewPager2 + offscreenPageLimit=2**: 三页全部保持活跃，地图页在后台也能接收 BLE 数据更新，切回时无需重新渲染。
+
+### 7.2 流程
+
+8. **TDD 发现了 4 个真实 Bug**: `PointF`/`RectF` 互操作、`hitTest` 边界、地图墙壁数据含出口坐标、A\* 测试断言过严。如果没有先写测试，这些问题可能在硬件联调时才暴露。
+
+9. **Spec 先行减少了返工**: 在头脑风暴阶段确认了功能清单和设计决策 (5 个 ADR)，避免了开发中途的需求变更。**关键**: ADR 在写代码前记录，而非事后补写。
+
+10. **环境搭建占 30% 时间**: JDK 安装、SDK 路径查找、中文路径问题、资源文件迁移等环境问题消耗了大量时间。建议新项目一开始就用纯 ASCII 路径。
+
+11. **模板复用效率**: 基于 `esp32BluetoothAndroidTemplate` 搭建，BLE 扫描/连接/读写层直接迁移，只需修改设备名过滤 (`FIRE_CTRL`) 和 JSON 解析逻辑。**经验**: 维护可复用的模板项目对后续开发至关重要。
+
+### 7.3 跨平台 (Kotlin ↔ ESP32 C++)
+
+12. **双 A\* 实现注意事项**: ESP32 端 `findPath()` 返回完整路径用于 LED 驱动；Kotlin 端 `PathFinder.findPath()` 返回消防员进攻路线。两套实现必须使用相同的启发式 (曼哈顿距离) 和代价函数 (g=1/步)，确保结果一致。**验证方法**: 对同一地图数据分别运行两端 A\*，比较路径。
+
+13. **JSON 字段命名一致性**: ESP32 `sendJson()` 手写拼接的字段名必须与 Kotlin `FireDataParser` 解析的字段名严格一致。**踩坑**: 早期版本 ESP32 用 `"direction"` 单数，Kotlin 期望 `"directions"` 复数 → 解析失败。
+
+14. **BLE 重新广播机制**: ESP32 断连后 `delay(500)` 再 `startAdvertising()`。500ms 延迟是必要的 — 立即重启广播可能导致 Android BLE 栈无法识别设备。
+
+---
+
+## 八、踩坑总结 (Pitfalls)
+
+### 8.1 环境类
+
+| 序号 | 问题 | 症状 | 根因 | 解决 |
+|------|------|------|------|------|
+| P1 | `ClassNotFoundException` (4 测试类) | `gradlew test` 报找不到测试类 | 项目路径含中文字符 | 移至纯 ASCII 路径 `D:\ProgramData\FirefighterApp\` |
+| P2 | `java` 命令找不到 | `bash: java: command not found` | `JAVA_HOME` 未设置，或用了反斜杠路径 | `export JAVA_HOME="/c/Program Files/Eclipse Adoptium/jdk-17.0.20.8-hotspot"` (Unix 风格正斜杠) |
+| P3 | AGP 找不到 SDK | `SDK location not found` | `local.properties` 未创建 | 创建文件写入 `sdk.dir=D:/ProgramData/AndroidSDK` |
+| P4 | Gradle 中文路径警告 | 编译警告但不影响构建 | `android.overridePathCheck` 未设置 | `gradle.properties` 添加 `android.overridePathCheck=true` |
+
+### 8.2 Kotlin-Java 互操作类
+
+| 序号 | 问题 | 症状 | 根因 | 解决 |
+|------|------|------|------|------|
+| P5 | `PointF(Float,Float)` x=0, y=0 | 点击测试返回错误坐标 | Kotlin 调用 Java 构造函数 `PointF(float,float)` 时参数未正确传递 | 改用 `PointF().apply { x=...; y=... }` |
+| P6 | `RectF(Float,Float,Float,Float)` 全为 0 | `cellRect` 始终返回 (0,0,0,0) | 同 P5 — Kotlin-Java float 构造函数互操作 Bug | 改用 `RectF().apply { left=...; top=...; right=...; bottom=... }` |
+
+### 8.3 数据与算法类
+
+| 序号 | 问题 | 症状 | 根因 | 解决 |
+|------|------|------|------|------|
+| P7 | `hitTest` 越界 | 点击地图边缘 cell 返回错误结果 | `indexOfFirst` 边界索引偏移 1 | 修正边界计算逻辑 |
+| P8 | 地图墙壁数据含出口坐标 | A\* 路径测试随机失败 | `device_config.json` 中墙壁列表包含了出口位置 | 从 walls 中移除出口坐标 |
+| P9 | A\* 测试「path blocked at corridor bottleneck」断言过严 | 测试失败但算法正常输出绕行路径 | 测试预期路径被火堵死，但 A\* 找到了另一条绕行路线 | 修改测试预期，改为验证路径存在且避开火点 |
+
+### 8.4 BLE 通信类
+
+| 序号 | 问题 | 症状 | 根因 | 解决 |
+|------|------|------|------|------|
+| P10 | `BleSimulator` 引用不存在 | `BleManagerRepository.kt` 编译失败 | 模板代码包含模拟器引用，项目不需要 | 从仓库中删除 BleSimulator 相关代码 |
+| P11 | `BluetoothGattDescriptor` deprecation | IDE 黄色警告 | 模板代码使用 API 33 已弃用的方法 | 保留 — API 34 仍可用，且替代 API 需要 minSdk 33 |
+
+### 8.5 Git 与工具类
+
+| 序号 | 问题 | 症状 | 根因 | 解决 |
+|------|------|------|------|------|
+| P12 | `git push` 在 Git Bash 失败 | 连接超时 / 443 错误 | Windows 系统代理仅在 PowerShell 生效，Git Bash 不走代理 | 使用 `powershell.exe -Command "cd 'D:\ProgramData\FirefighterApp'; git push"` |
+| P13 | `.gitignore` 未排除构建产物 | `git status` 显示大量 build/ 文件 | 模板 .gitignore 不完整 | 添加 `*.apk`, `*.aab`, `build/`, `.gradle/`, `local.properties`, `.idea/` |
+
+---
+
+## 九、Git Push 特别说明
+
+Windows 环境下 Git Bash (MSYS2) 不走系统代理，导致 `git push` 超时。解决方法：
+
+```bash
+# ❌ Git Bash 直连 — 超时
+git push
+
+# ✅ 通过 PowerShell 推送 (系统代理生效)
+powershell.exe -Command "cd 'D:\ProgramData\FirefighterApp'; git push 2>&1"
+
+# ✅ 或配置 Git 使用系统代理
+git config --global http.proxy http://127.0.0.1:<port>
+git config --global https.proxy http://127.0.0.1:<port>
+```
+
+---
+
+## 十、待办事项 (Phase 7 联调测试)
+
+- [ ] **7.1** 端到端功能测试 (无火/单火/多火/灭火/命令)
+- [ ] **7.2** 地图精确校准 (colWidths/rowHeights 物理对齐)
+- [ ] **7.3** BLE 性能测试 (延迟/稳定性/断连重连)
+- [ ] **7.4** 边界情况测试 (压力/MTU/横竖屏)
+- [ ] **7.5** 代码清理与文档
+
+---
+
+## 十一、版本历史
 
 | 版本 | 日期 | 内容 |
 |------|------|------|
@@ -316,7 +489,8 @@ D:\ProgramData\FirefighterApp\
 | v0.4 | 2026-08-09 上午 | A\* 寻路 + 危险预警 + 手势交互 |
 | v0.5 | 2026-08-09 下午 | 分析面板完善 + DataStore + Adapters + ESP32 固件 |
 | v1.0 | 待定 | 硬件联调完成后发布 |
+| doc v2.0 | 2026-08-09 | 文档升级: 补充重要设定(6项)、经验教训(14条)、踩坑总结(13项 P1-P13) |
 
 ---
 
-*文档版本: v1.0 | 创建日期: 2026-08-09*
+*文档版本: v2.0 | 创建日期: 2026-08-09 | 最后更新: 2026-08-09 (补充关键经验/重要设定/踩坑总结)*
