@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">消防员终端</string>
+    <string name="tab_device">设备</string>
+    <string name="tab_map">地图</string>
+    <string name="tab_analysis">分析</string>
+    <string name="scan">扫描设备</string>
+    <string name="disconnect">断开连接</string>
+    <string name="connected">已连接</string>
+    <string name="disconnected">未连接</string>
+    <string name="connecting">连接中...</string>
+    <string name="fire_count">火灾点</string>
+    <string name="trapped_areas">被困区域</string>
+    <string name="exits_available">可用出口</string>
+    <string name="voice_mode">语音模式</string>
+    <string name="rescue_priority">救援优先级</string>
+    <string name="timeline">火灾时间线</string>
+    <string name="spread_trend">火势趋势</string>
+    <string name="quick_control">快捷控制</string>
+    <string name="system_reset">系统复位</string>
+    <string name="clear_fires">关闭全部火点</string>
+    <string name="confirm_reset">确认系统复位？</string>
+    <string name="confirm_clear">确认关闭全部火点？</string>
+</resources>

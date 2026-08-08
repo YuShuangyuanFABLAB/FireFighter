@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 深色消防主题 -->
+    <color name="background_dark">#FF1a1a2e</color>
+    <color name="surface_dark">#FF16213e</color>
+    <color name="accent">#FF4ecdc4</color>
+    <color name="danger">#FFff6b6b</color>
+    <color name="warning">#FFf39c12</color>
+    <color name="success">#FF4CAF50</color>
+    <color name="text_primary">#FFFFFFFF</color>
+    <color name="text_secondary">#FFa0a0a0</color>
+    <color name="fire_glow">#FFFF4500</color>
+    <color name="trapped_wave">#FFFFD700</color>
+    <color name="exit_glow">#FF00FF88</color>
+    <color name="path_blue">#FF4ecdc4</color>
+    <color name="wall_dark">#FF3d3d5c</color>
+    <color name="wall_light">#FF2d2d4c</color>
+    <color name="floor_color">#FF252540</color>
+    <color name="grid_line">#FF2a2a45</color>
+</resources>

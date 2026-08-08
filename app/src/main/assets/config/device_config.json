@@ -1,0 +1,44 @@
+{
+  "appConfig": {
+    "appName": "消防员终端",
+    "scanDuration": 10000,
+    "autoReconnect": true,
+    "reconnectInterval": 5000,
+    "maxReconnectAttempts": 3
+  },
+  "bleConfig": {
+    "services": [
+      {
+        "uuid": "0000fff0-0000-1000-8000-00805f9b34fb",
+        "characteristics": [
+          {
+            "uuid": "0000fff1-0000-1000-8000-00805f9b34fb",
+            "type": "NOTIFY",
+            "dataFormat": "JSON"
+          },
+          {
+            "uuid": "0000fff2-0000-1000-8000-00805f9b34fb",
+            "type": "WRITE",
+            "dataFormat": "CUSTOM"
+          }
+        ]
+      }
+    ],
+    "deviceFilters": [
+      {
+        "namePattern": "FIRE_CTRL",
+        "required": true
+      }
+    ]
+  },
+  "mapLayout": {
+    "cols": 10,
+    "rows": 5,
+    "colWidths": [60.0, 80.0, 60.0, 80.0, 60.0, 80.0, 60.0, 80.0, 60.0, 80.0],
+    "rowHeights": [80.0, 60.0, 80.0, 60.0, 80.0],
+    "wallColor": "#3d3d5c",
+    "floorColor": "#252540",
+    "gridLineColor": "#2a2a45",
+    "padding": 12.0
+  }
+}
