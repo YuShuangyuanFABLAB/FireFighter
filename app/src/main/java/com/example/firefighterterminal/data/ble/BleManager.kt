@@ -34,6 +34,10 @@ class BleManager(private val context: Context) {
     companion object {
         private const val TAG = "BleManager"
         private const val SCAN_TIMEOUT_MS = 10000L
+        private const val MTU_FALLBACK_DELAY_MS = 2000L
+        private const val CCCD_RETRY_DELAY_MS = 500L
+        private const val CCCD_MAX_ATTEMPTS = 3
+        private const val READY_COMMAND = "READY"
     }
 
     // Bluetooth相关
@@ -50,6 +54,16 @@ class BleManager(private val context: Context) {
     // 连接相关
     private var bluetoothGatt: BluetoothGatt? = null
     private val connectionHandler = Handler(Looper.getMainLooper())
+
+    // 通知设置状态 (每次连接生命周期内有效)
+    private var notificationSetupDone = false
+    private var cccdWriteAttempts = 0
+    private var currentNotifyUuid: UUID? = null
+    private var currentWriteUuid: UUID? = null
+    private val mtuFallbackRunnable = Runnable {
+        Log.w(TAG, "onMtuChanged 超时未回调，使用默认 MTU 继续启用通知")
+        proceedToEnableNotifications()
+    }
 
     // 状态 - 使用MutableLiveData以兼容ViewModel
     private val _scanState = MutableLiveData<ScanState>()
@@ -200,9 +214,11 @@ class BleManager(private val context: Context) {
     /**
      * 连接到设备
      * @param device 要连接的IoT设备
+     * @param characteristicUuid 通知特征值UUID (接收数据)
+     * @param writeUuid 写入特征值UUID (发送命令/READY握手，可为null)
      */
     @SuppressLint("MissingPermission")
-    fun connectToDevice(device: IotDevice, serviceUuid: UUID, characteristicUuid: UUID) {
+    fun connectToDevice(device: IotDevice, serviceUuid: UUID, characteristicUuid: UUID, writeUuid: UUID? = null) {
         // 停止扫描
         stopScan()
 
@@ -211,12 +227,17 @@ class BleManager(private val context: Context) {
             disconnectQuietly()
         }
 
+        // 重置通知设置状态并记录本次连接的特征值
+        resetNotificationSetup()
+        currentNotifyUuid = characteristicUuid
+        currentWriteUuid = writeUuid
+
         _connectionState.postValue(ConnectionState.Connecting(device))
 
         try {
             val rawDevice = device.rawDevice
             if (rawDevice != null) {
-                bluetoothGatt = rawDevice.connectGatt(context, false, createGattCallback(serviceUuid, characteristicUuid))
+                bluetoothGatt = rawDevice.connectGatt(context, false, createGattCallback())
                 Log.d(TAG, "正在连接到设备: ${device.name}")
             } else {
                 _connectionState.postValue(ConnectionState.Error("设备信息无效"))
@@ -225,6 +246,15 @@ class BleManager(private val context: Context) {
             Log.e(TAG, "连接失败: ${e.message}")
             _connectionState.postValue(ConnectionState.Error(e.message ?: "未知错误"))
         }
+    }
+
+    /**
+     * 重置通知设置状态 (连接建立前/断开时调用)
+     */
+    private fun resetNotificationSetup() {
+        notificationSetupDone = false
+        cccdWriteAttempts = 0
+        connectionHandler.removeCallbacks(mtuFallbackRunnable)
     }
 
     /**
@@ -238,6 +268,8 @@ class BleManager(private val context: Context) {
         bluetoothGatt?.disconnect()
         bluetoothGatt?.close()
         bluetoothGatt = null
+
+        resetNotificationSetup()
 
         val disconnectedState = ConnectionState.Disconnected
         _connectionState.postValue(disconnectedState)
@@ -260,21 +292,29 @@ class BleManager(private val context: Context) {
         bluetoothGatt?.close()
         bluetoothGatt = null
 
+        resetNotificationSetup()
         connectionHandler.removeCallbacksAndMessages(null)
     }
 
     /**
-     * 启用通知
+     * 启用通知（MTU 协商完成或兜底超时后调用，每次连接只执行一次）
      */
     @SuppressLint("MissingPermission")
-    fun enableNotifications(characteristicUuid: UUID): Boolean {
-        val gatt = bluetoothGatt ?: run {
-            Log.e(TAG, "enableNotifications: GATT为空")
-            return false
+    private fun proceedToEnableNotifications() {
+        if (notificationSetupDone) return
+        notificationSetupDone = true
+
+        val uuid = currentNotifyUuid ?: run {
+            Log.e(TAG, "proceedToEnableNotifications: 未记录通知特征值UUID")
+            return
         }
-        val characteristic = findCharacteristic(characteristicUuid) ?: run {
-            Log.e(TAG, "enableNotifications: 找不到特征值 $characteristicUuid")
-            return false
+        val gatt = bluetoothGatt ?: run {
+            Log.e(TAG, "proceedToEnableNotifications: GATT为空")
+            return
+        }
+        val characteristic = findCharacteristic(uuid) ?: run {
+            Log.e(TAG, "proceedToEnableNotifications: 找不到特征值 $uuid")
+            return
         }
 
         Log.d(TAG, "启用通知，特征值: ${characteristic.uuid}")
@@ -283,25 +323,41 @@ class BleManager(private val context: Context) {
         Log.d(TAG, "setCharacteristicNotification 结果: $success")
 
         if (success) {
-            // 写入descriptor以启用通知
-            val cccdUuid = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
-            val descriptor = characteristic.getDescriptor(cccdUuid)
+            writeCccdDescriptor(characteristic)
+        } else {
+            Log.e(TAG, "setCharacteristicNotification 失败，无法接收数据")
+        }
+    }
 
-            if (descriptor != null) {
-                Log.d(TAG, "找到CCCD descriptor: ${descriptor.uuid}")
-                descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+    /**
+     * 写入 CCCD descriptor 以启用通知（失败时由 onDescriptorWrite 自动重试）
+     */
+    @SuppressLint("MissingPermission")
+    private fun writeCccdDescriptor(characteristic: BluetoothGattCharacteristic) {
+        val gatt = bluetoothGatt ?: return
+        val cccdUuid = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+        val descriptor = characteristic.getDescriptor(cccdUuid)
 
-                // 添加延迟，确保前序操作完成（特别是重连场景）
-                connectionHandler.postDelayed({
-                    val writeResult = gatt.writeDescriptor(descriptor)
-                    Log.d(TAG, "writeDescriptor 结果: $writeResult")
-                }, 100)  // 100ms 延迟
-            } else {
-                Log.e(TAG, "找不到CCCD descriptor")
-            }
+        if (descriptor == null) {
+            Log.e(TAG, "找不到CCCD descriptor")
+            return
         }
 
-        return success
+        descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+        val writeResult = gatt.writeDescriptor(descriptor)
+        Log.d(TAG, "writeDescriptor 结果: $writeResult (第${cccdWriteAttempts + 1}次尝试)")
+    }
+
+    /**
+     * 通知启用成功后发送 READY 握手命令，告知 ESP32 可以推送静态配置
+     */
+    private fun sendReadyToDevice() {
+        val writeUuid = currentWriteUuid ?: run {
+            Log.w(TAG, "未配置 WRITE 特征值，跳过 READY 握手（依赖 ESP32 兜底推送）")
+            return
+        }
+        val success = writeData(writeUuid, READY_COMMAND.toByteArray(Charsets.UTF_8))
+        Log.d(TAG, "发送 READY 握手命令: $success")
     }
 
     /**
@@ -385,10 +441,7 @@ class BleManager(private val context: Context) {
     /**
      * 创建GATT回调
      */
-    private fun createGattCallback(
-        serviceUuid: UUID,
-        characteristicUuid: UUID
-    ): BluetoothGattCallback {
+    private fun createGattCallback(): BluetoothGattCallback {
         return object : BluetoothGattCallback() {
             override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
                 Log.d(TAG, "连接状态改变: status=$status, newState=$newState")
@@ -408,6 +461,7 @@ class BleManager(private val context: Context) {
                     val errorState = ConnectionState.Error(errorMsg)
                     _connectionState.postValue(errorState)
                     onConnectionStateChanged?.invoke(errorState)  // 触发回调
+                    resetNotificationSetup()
                     gatt.close()
                     bluetoothGatt = null
                     return
@@ -419,15 +473,14 @@ class BleManager(private val context: Context) {
                         val connectedState = ConnectionState.Connected(gatt.device.address)
                         _connectionState.postValue(connectedState)
                         onConnectionStateChanged?.invoke(connectedState)  // 触发回调
-                        // 请求更大的 MTU 以避免数据截断（默认约20字节，请求512字节）
-                        val mtuResult = gatt.requestMtu(512)
-                        Log.d(TAG, "requestMtu(512) 结果: $mtuResult")
-                        // 发现服务
+                        // 仅发起服务发现；MTU 请求延后到 onServicesDiscovered
+                        // (华为/鸿蒙 BLE 栈要求: 服务发现完成前不能发起 MTU 交换，否则发现过程挂死)
                         val discoverResult = gatt.discoverServices()
                         Log.d(TAG, "discoverServices() 返回: $discoverResult")
                     }
                     BluetoothProfile.STATE_DISCONNECTED -> {
                         Log.d(TAG, "BLE连接断开")
+                        resetNotificationSetup()
                         val disconnectedState = ConnectionState.Disconnected
                         _connectionState.postValue(disconnectedState)
                         onConnectionStateChanged?.invoke(disconnectedState)  // 触发回调
@@ -453,9 +506,11 @@ class BleManager(private val context: Context) {
                             Log.d(TAG, "  特征值: ${char.uuid}, 属性: ${char.properties}")
                         }
                     }
-                    // 启用通知
-                    val notifyResult = enableNotifications(characteristicUuid)
-                    Log.d(TAG, "启用通知结果: $notifyResult")
+                    // 服务发现完成后请求更大的 MTU (默认约20字节，请求512字节)
+                    val mtuResult = gatt.requestMtu(512)
+                    Log.d(TAG, "requestMtu(512) 结果: $mtuResult")
+                    // 兜底: 若 onMtuChanged 未回调 (个别设备栈差异)，超时后仍启用通知
+                    connectionHandler.postDelayed(mtuFallbackRunnable, MTU_FALLBACK_DELAY_MS)
                 } else {
                     Log.e(TAG, "服务发现失败: $status")
                     _connectionState.postValue(ConnectionState.Error("服务发现失败($status)"))
@@ -491,15 +546,33 @@ class BleManager(private val context: Context) {
                 descriptor: BluetoothGattDescriptor?,
                 status: Int
             ) {
-                Log.d(TAG, "Descriptor写入完成, status=$status")
+                if (status == BluetoothGatt.GATT_SUCCESS) {
+                    cccdWriteAttempts = 0
+                    Log.d(TAG, "✅ CCCD写入成功，通知已启用")
+                    // 通知启用后向 ESP32 发送 READY 握手，触发静态配置推送
+                    sendReadyToDevice()
+                } else {
+                    cccdWriteAttempts++
+                    Log.e(TAG, "❌ CCCD写入失败 (status=$status)，第$cccdWriteAttempts 次尝试")
+                    if (cccdWriteAttempts < CCCD_MAX_ATTEMPTS) {
+                        connectionHandler.postDelayed({
+                            descriptor?.characteristic?.let { writeCccdDescriptor(it) }
+                        }, CCCD_RETRY_DELAY_MS)
+                    } else {
+                        Log.e(TAG, "CCCD写入重试 $CCCD_MAX_ATTEMPTS 次仍失败，放弃启用通知")
+                    }
+                }
             }
 
             override fun onMtuChanged(gatt: BluetoothGatt?, mtu: Int, status: Int) {
+                connectionHandler.removeCallbacks(mtuFallbackRunnable)
                 if (status == BluetoothGatt.GATT_SUCCESS) {
                     Log.d(TAG, "✅ MTU 设置成功，新 MTU: $mtu")
                 } else {
                     Log.e(TAG, "❌ MTU 设置失败 (status=$status)，使用默认 MTU")
                 }
+                // 无论 MTU 是否协商成功，都继续启用通知（小 MTU 下长消息可能被截断，但短消息仍可用）
+                proceedToEnableNotifications()
             }
         }
     }

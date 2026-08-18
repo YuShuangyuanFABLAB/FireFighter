@@ -217,6 +217,7 @@ bool bleDeviceConnected = false;
 bool oldBleDeviceConnected = false;
 unsigned long bleConnectTime = 0;
 bool bleConfigSent = false;
+bool bleReadyReceived = false;
 unsigned long lastBleHeartbeat = 0;
 unsigned long lastBleSensorPush = 0;
 
@@ -226,11 +227,13 @@ class FireServerCallbacks : public BLEServerCallbacks {
     bleDeviceConnected = true;
     bleConnectTime = millis();
     bleConfigSent = false;
-    Serial.println("[BLE] 设备已连接，2s后推送配置...");
+    bleReadyReceived = false;
+    Serial.println("[BLE] 设备已连接，等待APP READY握手...");
   }
   void onDisconnect(BLEServer* pServer) {
     bleDeviceConnected = false;
     bleConfigSent = false;
+    bleReadyReceived = false;
     Serial.println("[BLE] 设备已断开，重新广播");
     delay(500);
     pServer->startAdvertising();
@@ -809,6 +812,10 @@ void processBleCommand(const String& cmd) {
     while (fireCount > 0) removeFire(fires[0]);
     computeAllPaths();
     sendJson("{\"type\":\"CMD_RESPONSE\",\"cmd\":\"SYSTEM_RESET\",\"status\":\"OK\"}");
+  } else if (cmd == "READY") {
+    // APP 通知订阅完成后的握手命令，主循环检测后立即推送静态配置
+    bleReadyReceived = true;
+    Serial.println("[BLE] 收到 READY 握手，准备推送静态配置");
   }
 }
 
@@ -849,8 +856,9 @@ void loop() {
     // 连接成功，但等待 GATT 服务发现 + 通知启用后再推送
   }
 
-  // 连接后延迟 2s 推送静态配置（等待 APP 端完成服务发现和通知启用）
-  if (bleDeviceConnected && !bleConfigSent && (now - bleConnectTime > 2000)) {
+  // 收到 APP READY 握手后立即推送静态配置;
+  // 5s 兜底: 兼容旧版 APP (不发送 READY)，避免配置永远不推送
+  if (bleDeviceConnected && !bleConfigSent && (bleReadyReceived || (now - bleConnectTime > 5000))) {
     bleConfigSent = true;
     Serial.println("[BLE] 推送静态配置 + 当前状态");
     pushStaticConfig();

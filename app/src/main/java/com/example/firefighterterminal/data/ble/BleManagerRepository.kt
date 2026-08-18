@@ -98,11 +98,11 @@ object BleManagerRepository {
         return bleManager?.writeData(characteristicUuid, data) ?: false
     }
 
-    fun connectToDevice(device: IotDevice, serviceUuid: UUID, characteristicUuid: UUID) {
+    fun connectToDevice(device: IotDevice, serviceUuid: UUID, characteristicUuid: UUID, writeUuid: UUID? = null) {
         bleManager?.onConnectionStateChanged = { state -> notifyConnectionStateChanged(state) }
         bleManager?.onDataReceived = { data -> notifyDataReceived(data) }
         currentDevice = device
-        bleManager?.connectToDevice(device, serviceUuid, characteristicUuid)
+        bleManager?.connectToDevice(device, serviceUuid, characteristicUuid, writeUuid)
     }
 
     fun disconnect() {

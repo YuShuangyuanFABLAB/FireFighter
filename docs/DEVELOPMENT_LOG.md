@@ -441,6 +441,7 @@ firefighter_data (Preferences DataStore)
 |------|------|------|------|------|
 | P10 | `BleSimulator` 引用不存在 | `BleManagerRepository.kt` 编译失败 | 模板代码包含模拟器引用，项目不需要 | 从仓库中删除 BleSimulator 相关代码 |
 | P11 | `BluetoothGattDescriptor` deprecation | IDE 黄色警告 | 模板代码使用 API 33 已弃用的方法 | 保留 — API 34 仍可用，且替代 API 需要 minSdk 33 |
+| P14 | 鸿蒙 (HarmonyOS 4.x) BLE 服务发现挂死 | APP 可扫描可连接但收不到任何数据，地图空白；logcat 显示 `onServicesDiscovered` 从不回调 | 连接成功后 `requestMtu(512)` 与 `discoverServices()` 并发发起——华为/鸿蒙 BLE 栈在服务发现完成前不支持 MTU 交换，MTU 交换成功但发现过程被卡死（vivo 栈容忍此顺序故正常） | 调整 GATT 顺序: 先 `discoverServices` → `onServicesDiscovered` 后 `requestMtu(512)` → `onMtuChanged` 后启用通知；并加固: MTU 回调 2s 兜底超时、CCCD 写入失败重试 3 次、APP 发 `READY` 握手触发 ESP32 推送静态配置（固件保留 5s 兜底兼容旧 APP） |
 
 ### 8.5 Git 与工具类
 
@@ -489,8 +490,9 @@ git config --global https.proxy http://127.0.0.1:<port>
 | v0.4 | 2026-08-09 上午 | A\* 寻路 + 危险预警 + 手势交互 |
 | v0.5 | 2026-08-09 下午 | 分析面板完善 + DataStore + Adapters + ESP32 固件 |
 | **v1.0.0** | **2026-08-18** | **★ 关键版本: 发布 — vivo OriginOS 6 真机验证运行正常** (BLE连接/三页架构可用, git tag `v1.0.0`) |
+| v1.0.1 | 2026-08-18 | fix: 鸿蒙 BLE 服务发现挂死 — GATT 顺序修正 + READY 握手 + CCCD 重试 (鸿蒙 4.0/4.2 真机验证通过) |
 | doc v2.0 | 2026-08-09 | 文档升级: 补充重要设定(6项)、经验教训(14条)、踩坑总结(13项 P1-P13) |
 
 ---
 
-*文档版本: v2.0 | 创建日期: 2026-08-09 | 最后更新: 2026-08-18 (v1.0.0 关键版本发布: vivo OriginOS 6 真机验证)*
+*文档版本: v2.0 | 创建日期: 2026-08-09 | 最后更新: 2026-08-18 (v1.0.1 修复鸿蒙 BLE 兼容问题)*

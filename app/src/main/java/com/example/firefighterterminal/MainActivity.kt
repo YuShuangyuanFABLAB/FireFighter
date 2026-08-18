@@ -137,7 +137,9 @@ class MainActivity : AppCompatActivity() {
         val serviceUuid = bleConfig.services.firstOrNull()?.let { java.util.UUID.fromString(it.uuid) } ?: return
         val notifyUuid = bleConfig.services.firstOrNull()?.characteristics
             ?.find { it.type == "NOTIFY" }?.let { java.util.UUID.fromString(it.uuid) } ?: return
-        BleManagerRepository.connectToDevice(device, serviceUuid, notifyUuid)
+        val writeUuid = bleConfig.services.firstOrNull()?.characteristics
+            ?.find { it.type == "WRITE" }?.let { java.util.UUID.fromString(it.uuid) }
+        BleManagerRepository.connectToDevice(device, serviceUuid, notifyUuid, writeUuid)
         switchToTab(1)
     }
 
